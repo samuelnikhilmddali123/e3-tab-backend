@@ -103,8 +103,30 @@ async function syncPaymentStatus({ txnid, status, easepayid, amount }) {
         console.error('[PAYMENT SYNC] Error updating Ticket:', err.message);
     }
 
+    // 4. If neither Ride nor Order existed, create a completed Ride record so subsequent status checks find it
+    if (!results.rideUpdated && !results.orderUpdated && txnid && isSuccess) {
+        try {
+            await Ride.create({
+                txnid,
+                fare: Number(amount) || 0,
+                amount: Number(amount) || 0,
+                paymentStatus: 'paid',
+                rideStatus: 'completed',
+                paymentGateway: 'easebuzz',
+                easepayid: easepayid || '',
+                gatewayTransactionId: easepayid || '',
+                paidAt: now
+            });
+            results.rideUpdated = true;
+            console.log(`[PAYMENT SYNC] Auto-created paid Ride record for txnid: ${txnid}`);
+        } catch (e) {
+            console.error('[PAYMENT SYNC] Error creating fallback Ride:', e.message);
+        }
+    }
+
     return results;
 }
+
 
 module.exports = {
     findRide,

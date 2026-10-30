@@ -402,8 +402,10 @@ router.get('/:orderId/status', async (req, res) => {
             orderId: order._id.toString(),
             txnid: order.txnid || order._id.toString(),
             amount: order.totalAmount,
+            isPaid: order.paymentStatus === 'paid',
             paidAt: order.paidAt || null
         });
+
     } catch (err) {
         res.status(500).json({ status: 'FAILED', message: err.message });
     }

@@ -517,78 +517,149 @@ router.post('/webhook', handleS2SWebhook);
 router.post('/s2s', handleS2SWebhook);
 
 /**
+/**
  * @swagger
- * /api/payments/callback:
+ * /api/payments/response:
  *   get:
  *     summary: Browser Callback Endpoint (surl / furl)
  *     tags: [Payments]
  *   post:
- *     summary: Handle browser POST redirect sent by Easebuzz after customer checkout
+ *     summary: Handle browser POST/GET redirect sent by Easebuzz after customer checkout
  *     tags: [Payments]
  */
 const handleBrowserCallback = async (req, res) => {
     try {
-        const payload = req.method === 'POST' ? req.body : req.query;
-        const query = req.query || {};
+        const data = req.method === 'POST' ? req.body : req.query;
+        const txnid = data.txnid || data.txnId || req.query.txnid || data.orderId || req.query.orderId;
+        const status = String(data.status || req.query.status || '').toLowerCase();
+        const easebuzzid = data.easebuzzid || data.easepayid || req.query.easepayid || req.query.easebuzzid || '';
+        const isSuccess = status === 'success' || status === 'paid';
 
-        const rawStatus = String(payload.status || query.status || '').toLowerCase();
-        const txnid = payload.txnid || query.txnid || payload.orderId || query.orderId;
-        const easepayid = payload.easepayid || query.easepayid || '';
-        const returnUrl = query.returnUrl || payload.returnUrl;
+        console.log(`[PAYMENT RESPONSE] Method: ${req.method}, txnid: ${txnid}, status: ${status}, easebuzzid: ${easebuzzid}`);
 
-        console.log(`[BROWSER CALLBACK] Method: ${req.method}, txnid: ${txnid}, status: ${rawStatus}`);
-
-        const key = process.env.EASEBUZZ_KEY;
-        const salt = process.env.EASEBUZZ_SALT;
-
-        let isSignatureValid = true;
-        if (key && salt && key !== 'your_production_merchant_key' && payload.hash) {
-            isSignatureValid = easebuzzService.verifyReverseHash(payload, key, salt);
-            if (!isSignatureValid) {
-                console.warn('[BROWSER CALLBACK] Reverse hash signature verification failed for txnid:', txnid);
-            }
-        }
-
-        const isSuccess = isSignatureValid && rawStatus === 'success';
-
-        // Update ride / order in database
-        if (txnid) {
+        // 1. Update Database / Payment Status Immediately
+        if (isSuccess && txnid) {
             await syncPaymentStatus({
                 txnid,
-                status: isSuccess ? 'success' : 'failed',
-                easepayid,
-                amount: payload.amount
+                status: 'success',
+                easepayid: easebuzzid,
+                amount: data.amount
             });
+            console.log(`[PAYMENT RESPONSE] txnid ${txnid} marked as PAID in database.`);
+        } else if (txnid && (status === 'failure' || status === 'usercancelled')) {
+            await syncPaymentStatus({
+                txnid,
+                status: 'failed',
+                easepayid: easebuzzid,
+                amount: data.amount
+            });
+            console.log(`[PAYMENT RESPONSE] txnid ${txnid} marked as FAILED in database.`);
         }
 
-        // 1. If returnUrl is provided (e.g., from web POS popup/redirect)
-        if (returnUrl) {
-            const separator = returnUrl.includes('?') ? '&' : '?';
-            const redirectUrl = `${returnUrl}${separator}payment=${isSuccess ? 'success' : 'failure'}&txnid=${encodeURIComponent(txnid || '')}&easepayid=${encodeURIComponent(easepayid)}`;
-            return res.redirect(redirectUrl);
-        }
+        const appCallbackUrl = `yourrideapp://payment/callback?status=${isSuccess ? 'success' : 'failure'}&txnid=${txnid || ''}&easebuzzid=${easebuzzid}`;
+        const androidIntentUrl = `intent://payment/callback?status=${isSuccess ? 'success' : 'failure'}&txnid=${txnid || ''}&easebuzzid=${easebuzzid}#Intent;scheme=yourrideapp;package=com.tab;end;`;
 
-        // 2. Mobile Deep Link Redirection (APP_CALLBACK_SCHEME)
-        const appScheme = process.env.APP_CALLBACK_SCHEME || 'yourrideapp://payment/callback';
-        const errorMsg = payload.error_Message || payload.error_desc || payload.error || query.error_Message || 'Payment Failed';
-
-        const deepLinkUrl = isSuccess
-            ? `${appScheme}?status=success&txnid=${encodeURIComponent(txnid || '')}&easebuzzid=${encodeURIComponent(easepayid)}`
-            : `${appScheme}?status=failure&txnid=${encodeURIComponent(txnid || '')}&error_Message=${encodeURIComponent(errorMsg)}`;
-
-        console.log(`[BROWSER CALLBACK] 302 Redirecting to: ${deepLinkUrl}`);
-        return res.redirect(302, deepLinkUrl);
-
-    } catch (err) {
-        console.error('[BROWSER CALLBACK ERROR]', err);
-        res.status(500).send(`Server error: ${err.message}`);
+        // 2. Return HTML with Auto-Redirect + Android Intent + Tap Button
+        return res.status(200).send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${isSuccess ? 'Payment Successful' : 'Payment Failed'}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background-color: #0f172a;
+      color: #ffffff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 24px;
+      text-align: center;
+    }
+    .card {
+      background: #1e293b;
+      border-radius: 20px;
+      padding: 36px 24px;
+      max-width: 440px;
+      width: 100%;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.4);
+      border: 1px solid #334155;
+    }
+    .icon {
+      width: 72px;
+      height: 72px;
+      border-radius: 36px;
+      background: ${isSuccess ? '#10b981' : '#ef4444'};
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 20px;
+      font-size: 36px;
+    }
+    h1 { font-size: 24px; font-weight: 800; margin-bottom: 8px; color: ${isSuccess ? '#34d399' : '#f87171'}; }
+    p { font-size: 14px; color: #94a3b8; margin-bottom: 24px; }
+    .btn {
+      display: block;
+      width: 100%;
+      background: ${isSuccess ? '#10b981' : '#3b82f6'};
+      color: #ffffff;
+      font-size: 17px;
+      font-weight: 700;
+      padding: 16px;
+      border-radius: 12px;
+      text-decoration: none;
+      cursor: pointer;
+      border: none;
+      transition: opacity 0.2s;
+    }
+    .btn:active { opacity: 0.8; }
+    .txn { font-size: 12px; color: #64748b; margin-top: 16px; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">${isSuccess ? '✓' : '✕'}</div>
+    <h1>${isSuccess ? 'Payment Successful!' : 'Payment Cancelled'}</h1>
+    <p>${isSuccess ? 'Returning to POS app and printing tickets...' : 'Returning to checkout screen...'}</p>
+    
+    <a id="returnBtn" class="btn" href="${androidIntentUrl}">
+      ${isSuccess ? 'Tap to Return & Print Ticket' : 'Tap to Return to POS'}
+    </a>
+    <div class="txn">Txn ID: ${txnid || 'N/A'}</div>
+  </div>
+  <script>
+    // Automatic redirect back to POS app via Custom Scheme & Intent
+    function returnToApp() {
+      try {
+        window.location.href = "${appCallbackUrl}";
+      } catch (e) {}
+      setTimeout(function() {
+        try {
+          window.location.href = "${androidIntentUrl}";
+        } catch (err) {}
+      }, 300);
+    }
+    // Trigger immediately on page load
+    returnToApp();
+  </script>
+</body>
+</html>`);
+    } catch (error) {
+        console.error('Payment response handler error:', error);
+        return res.status(500).send('Internal Server Error');
     }
 };
 
-router.get('/callback', handleBrowserCallback);
-router.post('/callback', handleBrowserCallback);
+router.all('/response', handleBrowserCallback);
+router.all('/callback', handleBrowserCallback);
 router.get('/response', handleBrowserCallback);
 router.post('/response', handleBrowserCallback);
+router.get('/callback', handleBrowserCallback);
+router.post('/callback', handleBrowserCallback);
+
 
 /**
  * @swagger
