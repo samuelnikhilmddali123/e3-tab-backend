@@ -1,0 +1,29 @@
+@echo off
+TITLE Ngrok Live Tunnel - swampland-situated-barbell.ngrok-free.dev
+COLOR 0B
+
+echo ===============================================================================
+echo            STARTING NGROK TUNNEL FOR E3 TAB API BACKEND (PORT 5001)
+echo            Target Domain: https://swampland-situated-barbell.ngrok-free.dev
+echo ===============================================================================
+echo.
+
+set "NGROK_EXE=D:\ngrok.exe"
+if not exist "%NGROK_EXE%" (
+    if exist "%~dp0ngrok.exe" (
+        set "NGROK_EXE=%~dp0ngrok.exe"
+    ) else (
+        echo [ERROR] ngrok.exe was not found!
+        pause
+        exit /b 1
+    )
+)
+
+echo [INFO] Starting ngrok tunnel to Port 5001...
+echo Target: https://swampland-situated-barbell.ngrok-free.dev
+echo.
+echo Leave this window OPEN to keep the public API live!
+echo.
+
+"%NGROK_EXE%" http 5001 --url https://default.internal
+pause

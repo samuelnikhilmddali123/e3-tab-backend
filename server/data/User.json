@@ -1,0 +1,26 @@
+[
+    {
+        "name": "Ethree Admin",
+        "email": "admin@ethree.com",
+        "password": "$2b$10$XqevOC.6V98gDfopkK42lug/ql6sFeelImiuUIyQEq2e6elxUUQH6",
+        "role": "admin",
+        "_id": "1768115107036",
+        "createdAt": "2026-01-11T07:05:07.036Z"
+    },
+    {
+        "name": "User",
+        "email": "",
+        "password": "otp_user",
+        "role": "customer",
+        "_id": "1768115710469",
+        "createdAt": "2026-01-11T07:15:10.469Z"
+    },
+    {
+        "name": "POS Terminal 1",
+        "email": "pos@ethree.com",
+        "password": "$2b$10$xWRfAA4uATPVauiYrD6noem4Z3jnpBHV90b3yY/ukRziQwgw8aNtq",
+        "role": "pos",
+        "_id": "1769497887771",
+        "createdAt": "2026-01-27T07:11:27.771Z"
+    }
+]
