@@ -83,7 +83,12 @@ router.get('/stats', async (req, res) => {
         // We only count tickets created today
         const query = {
             createdAt: { $gte: startOfDay, $lte: endOfDay },
-            parentId: { $exists: false } // Only count master tickets for revenue/count
+            $or: [
+                { parentId: { $exists: false } },
+                { parentId: null },
+                { parentId: '' },
+                { isCoupon: false }
+            ] // Only count master tickets for revenue/count
         };
 
         if (req.query.posId && req.query.posId !== 'all') {

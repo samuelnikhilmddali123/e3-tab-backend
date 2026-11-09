@@ -13,7 +13,7 @@ const products = [
     { id: '1b', name: 'COMBO CHILD', price: 500, allowedPos: ['pos1@ethree.com'], category: 'play', version: '5.0', description: 'Standard Combo Pack for a complete ETHREE experience.', image: 'logo.jpeg' },
 
     // POS 1 RIDES (From Database Image)
-    { id: '2', name: 'TL TRAIN', price: 1, allowedPos: ['pos1@ethree.com'], category: 'play', version: '5.0', image: 'TL train.jpg' },
+    { id: '2', name: 'TL TRAIN', price: 50, allowedPos: ['pos1@ethree.com'], category: 'play', version: '5.0', image: 'TL train.jpg' },
     { id: '3', name: 'ETHREE BUS', price: 100, allowedPos: ['pos1@ethree.com'], category: 'play', version: '5.0', image: 'e three bus ride.webp' },
     { id: '4', name: 'BOUNCY', price: 100, allowedPos: ['pos1@ethree.com'], category: 'play', version: '5.0', image: 'BOUNCY.webp' },
     { id: '5', name: 'SAMBA BALLOON', price: 150, allowedPos: ['pos1@ethree.com'], category: 'play', version: '5.0', image: 'SAMBA BALLOON.jpg' },

@@ -3,7 +3,7 @@ import axios from 'axios';
 // Override the standard local API_URL with the public cloud API for all Admin actions
 import { API_URL } from '../api/config';
 import { useNavigate } from 'react-router-dom';
-import { Download, LogOut, RefreshCw, Receipt, Search, Trash2, AlertTriangle, BarChart3, List, Users, Printer } from 'lucide-react';
+import { Download, LogOut, RefreshCw, Receipt, Search, Trash2, AlertTriangle, BarChart3, List, Users, Printer, Tag, Check, CheckCircle2, AlertCircle, Radio, ExternalLink } from 'lucide-react';
 import { BluetoothPrinter } from '../api/BluetoothPrinter';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from 'recharts';
 
@@ -34,10 +34,24 @@ export default function AdminDashboard() {
     const [loading, setLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState('');
     const [selectedUserSales, setSelectedUserSales] = useState<string | null>(null);
-    const [view, setView] = useState<'transactions' | 'analytics' | 'users'>('transactions');
+    const [view, setView] = useState<'transactions' | 'analytics' | 'users' | 'pricing'>('transactions');
     const [ticketStats, setTicketStats] = useState({ total: 0, revenue: 0, scanned: 0, pending: 0 });
     const [allRawTickets, setAllRawTickets] = useState<any[]>([]);
     const [showAllHistory, setShowAllHistory] = useState(false);
+
+    // Ticket Pricing & App Prompt State
+    const [products, setProducts] = useState<any[]>([]);
+    const [loadingProducts, setLoadingProducts] = useState(false);
+    const [priceSearchTerm, setPriceSearchTerm] = useState('');
+    const [priceCategoryFilter, setPriceCategoryFilter] = useState<'all' | 'play' | 'food' | 'event'>('all');
+    const [editingPrices, setEditingPrices] = useState<{ [id: string]: number }>({});
+    const [savingPriceId, setSavingPriceId] = useState<string | null>(null);
+    const [priceNotification, setPriceNotification] = useState<{
+        type: 'success' | 'error';
+        message: string;
+        timestamp: number;
+    } | null>(null);
+    const [promptingApp, setPromptingApp] = useState(false);
 
     // Bluetooth Printer State
     const [isBTConnecting, setIsBTConnecting] = useState(false);
@@ -53,6 +67,7 @@ export default function AdminDashboard() {
         fetchTickets();
         fetchUsers();
         fetchStats();
+        fetchProducts();
 
         // Auto-Resume Bluetooth on Mount
         const autoResume = async () => {
@@ -188,6 +203,173 @@ export default function AdminDashboard() {
             console.error('Failed to fetch stats', error);
         }
     };
+
+    const fetchProducts = async () => {
+        setLoadingProducts(true);
+        try {
+            const token = localStorage.getItem('token');
+            const response = await axios.get(`${API_URL}/api/products?t=${Date.now()}`, {
+                headers: { Authorization: `Bearer ${token}` }
+            });
+            const data = response.data || [];
+            setProducts(data);
+
+            const initialPrices: { [id: string]: number } = {};
+            data.forEach((p: any) => {
+                const key = p._id || p.id;
+                initialPrices[key] = p.price;
+            });
+            setEditingPrices(initialPrices);
+            localStorage.setItem('cached_rides', JSON.stringify(data));
+        } catch (error: any) {
+            console.error('Failed to fetch products', error);
+            const cached = localStorage.getItem('cached_rides');
+            if (cached) {
+                try {
+                    const parsed = JSON.parse(cached);
+                    setProducts(parsed);
+                    const initialPrices: { [id: string]: number } = {};
+                    parsed.forEach((p: any) => {
+                        const key = p._id || p.id;
+                        initialPrices[key] = p.price;
+                    });
+                    setEditingPrices(initialPrices);
+                } catch (e) {
+                    console.error('Failed to parse cached rides', e);
+                }
+            }
+        } finally {
+            setLoadingProducts(false);
+        }
+    };
+
+    const handleUpdatePrice = async (product: any) => {
+        const key = product._id || product.id;
+        const newPrice = editingPrices[key];
+
+        if (newPrice === undefined || isNaN(Number(newPrice)) || Number(newPrice) < 0) {
+            setPriceNotification({
+                type: 'error',
+                message: 'Please enter a valid price (₹0 or more).',
+                timestamp: Date.now()
+            });
+            return;
+        }
+
+        setSavingPriceId(key);
+        try {
+            const token = localStorage.getItem('token');
+            // Try PATCH /:id/price first, fallback to PUT /:id
+            try {
+                await axios.patch(
+                    `${API_URL}/api/products/${key}/price`,
+                    { price: Number(newPrice) },
+                    { headers: { Authorization: `Bearer ${token}` } }
+                );
+            } catch (patchErr) {
+                console.warn('PATCH price failed, falling back to PUT...', patchErr);
+                await axios.put(
+                    `${API_URL}/api/products/${key}`,
+                    { ...product, price: Number(newPrice) },
+                    { headers: { Authorization: `Bearer ${token}` } }
+                );
+            }
+
+            // Update in local state
+            setProducts(prev => prev.map(p => {
+                if ((p._id || p.id) === key) {
+                    return { ...p, price: Number(newPrice) };
+                }
+                return p;
+            }));
+
+            // Sync to local cache
+            const updatedList = products.map(p => ((p._id || p.id) === key ? { ...p, price: Number(newPrice) } : p));
+            localStorage.setItem('cached_rides', JSON.stringify(updatedList));
+
+            // Broadcast to POS App
+            const syncPayload = {
+                type: 'PRICE_UPDATED',
+                rideId: key,
+                name: product.name,
+                oldPrice: product.price,
+                newPrice: Number(newPrice),
+                timestamp: Date.now()
+            };
+            localStorage.setItem('ticket_prices_updated_at', JSON.stringify(syncPayload));
+
+            try {
+                const channel = new BroadcastChannel('ethree_price_sync');
+                channel.postMessage(syncPayload);
+                channel.close();
+            } catch (e) {
+                // Channel broadcast fallback
+            }
+
+            setPriceNotification({
+                type: 'success',
+                message: `Ticket price for "${product.name}" updated to ₹${newPrice}! POS App has been notified and updated.`,
+                timestamp: Date.now()
+            });
+        } catch (error: any) {
+            console.error('Failed to update price', error);
+            setPriceNotification({
+                type: 'error',
+                message: `Failed to update ticket price: ${error.response?.data?.message || error.message}`,
+                timestamp: Date.now()
+            });
+        } finally {
+            setSavingPriceId(null);
+        }
+    };
+
+    const handlePromptApp = (specificProduct?: any) => {
+        setPromptingApp(true);
+        try {
+            const syncPayload = {
+                type: 'PROMPT_APP',
+                message: specificProduct
+                    ? `Admin refreshed ticket rate for ${specificProduct.name}: ₹${specificProduct.price}`
+                    : 'Admin has updated ticket prices and requested POS app synchronization.',
+                name: specificProduct?.name,
+                newPrice: specificProduct?.price,
+                timestamp: Date.now()
+            };
+            localStorage.setItem('ticket_prices_updated_at', JSON.stringify(syncPayload));
+
+            try {
+                const channel = new BroadcastChannel('ethree_price_sync');
+                channel.postMessage(syncPayload);
+                channel.close();
+            } catch (e) {
+                // Ignore fallback
+            }
+
+            setPriceNotification({
+                type: 'success',
+                message: '📢 Signal broadcasted! All active POS tablet apps have been prompted with latest ticket prices.',
+                timestamp: Date.now()
+            });
+        } catch (err: any) {
+            setPriceNotification({
+                type: 'error',
+                message: 'Failed to prompt app: ' + err.message,
+                timestamp: Date.now()
+            });
+        } finally {
+            setTimeout(() => setPromptingApp(false), 800);
+        }
+    };
+
+    // Auto-dismiss price notifications
+    useEffect(() => {
+        if (priceNotification) {
+            const timer = setTimeout(() => {
+                setPriceNotification(null);
+            }, 6000);
+            return () => clearTimeout(timer);
+        }
+    }, [priceNotification]);
 
     const handleLogout = () => {
         localStorage.removeItem('token');
@@ -547,6 +729,19 @@ export default function AdminDashboard() {
 
                         <div className="hidden md:flex items-center bg-slate-800/50 rounded-xl p-1 gap-1 border border-slate-700">
                             <button
+                                onClick={() => { setView('pricing'); fetchProducts(); }}
+                                className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 ${
+                                    view === 'pricing'
+                                        ? 'bg-amber-400 text-slate-900 shadow-md'
+                                        : 'text-amber-400 hover:text-amber-300 hover:bg-amber-500/10'
+                                }`}
+                                title="Change ticket prices and prompt app"
+                            >
+                                <Tag size={13} />
+                                <span>Ticket Prices</span>
+                            </button>
+                            <div className="w-px h-4 bg-slate-700"></div>
+                            <button
                                 onClick={() => setShowEmailModal(true)}
                                 className="px-3 py-1.5 text-xs font-bold text-slate-300 hover:text-white hover:bg-slate-700 rounded-lg transition-all"
                             >
@@ -581,6 +776,14 @@ export default function AdminDashboard() {
                 {/* Mobile Sub-Header for Actions */}
                 <div className="md:hidden border-t border-slate-800 mt-2 pt-2 flex justify-end gap-2 px-1">
                     <button
+                        onClick={() => { setView('pricing'); fetchProducts(); }}
+                        className={`text-[10px] font-bold uppercase tracking-wider px-2 py-1.5 rounded border ${
+                            view === 'pricing' ? 'bg-amber-400 text-slate-900 border-amber-400' : 'text-amber-400 bg-slate-800/50 border-slate-700'
+                        }`}
+                    >
+                        Ticket Prices
+                    </button>
+                    <button
                         onClick={() => setShowEmailModal(true)}
                         className="text-[10px] font-bold text-slate-400 hover:text-white uppercase tracking-wider bg-slate-800/50 px-2 py-1.5 rounded border border-slate-700"
                     >
@@ -588,7 +791,7 @@ export default function AdminDashboard() {
                     </button>
                     <button
                         onClick={() => setShowPasswordModal(true)}
-                        className="text-[10px] font-bold text-slate-400 hover:text-white uppercase tracking-wider bg-slate-800/50 px-2 py-1'5 rounded border border-slate-700"
+                        className="text-[10px] font-bold text-slate-400 hover:text-white uppercase tracking-wider bg-slate-800/50 px-2 py-1.5 rounded border border-slate-700"
                     >
                         Change Pwd
                     </button>
@@ -597,7 +800,7 @@ export default function AdminDashboard() {
 
             <main className="container mx-auto p-4 md:p-6 max-w-7xl">
                 {/* Stats Grid */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
                     {/* Total Revenue */}
                     <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-200 hover:shadow-md transition-shadow">
                         <div className="flex items-center justify-between mb-4">
@@ -647,20 +850,24 @@ export default function AdminDashboard() {
                         </div>
                     </div>
 
-                    {/* Ride Management Button - Replaced the card with one more card if needed, or keep it consistent */}
+                    {/* Ticket Price Settings Card */}
                     <div
-                        onClick={() => navigate('/admin/rides')}
-                        className="bg-white rounded-2xl p-6 shadow-sm border border-slate-200 hover:shadow-md transition-shadow cursor-pointer group"
+                        onClick={() => { setView('pricing'); fetchProducts(); }}
+                        className={`rounded-2xl p-6 shadow-sm border hover:shadow-md transition-all cursor-pointer group ${
+                            view === 'pricing'
+                                ? 'bg-amber-50 border-amber-400 ring-2 ring-amber-400/20'
+                                : 'bg-white border-slate-200 hover:border-amber-400'
+                        }`}
                     >
                         <div className="flex items-center justify-between mb-4">
-                            <div className="p-3 bg-blue-100 text-blue-600 rounded-xl group-hover:bg-blue-600 group-hover:text-white transition-colors">
-                                <List size={24} />
+                            <div className="p-3 bg-amber-100 text-amber-600 rounded-xl group-hover:bg-amber-500 group-hover:text-white transition-colors">
+                                <Tag size={24} />
                             </div>
-                            <span className="text-xs font-bold text-blue-600 bg-blue-50 px-2.5 py-1 rounded-lg uppercase tracking-wider">Configure</span>
+                            <span className="text-xs font-bold text-amber-700 bg-amber-100/80 px-2.5 py-1 rounded-lg uppercase tracking-wider">SETTING</span>
                         </div>
                         <div className="space-y-1">
-                            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Available Rides</p>
-                            <h3 className="text-3xl font-black text-slate-900">Manage Pricing</h3>
+                            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Live Rates & Sync</p>
+                            <h3 className="text-2xl font-black text-slate-900 group-hover:text-amber-600 transition-colors">Change Ticket Price</h3>
                         </div>
                     </div>
                 </div>
@@ -823,29 +1030,35 @@ export default function AdminDashboard() {
                 )}
 
                 {/* View Switcher & Toolbar */}
-                {/* View Switcher & Toolbar */}
                 <div className="flex flex-col md:flex-row justify-between items-center gap-4 mb-6 bg-white p-3 rounded-2xl shadow-sm border border-slate-200">
-                    <div className="grid grid-cols-3 md:flex bg-slate-100 p-1 rounded-xl w-full md:w-auto gap-1">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 md:flex bg-slate-100 p-1 rounded-xl w-full md:w-auto gap-1">
                         <button
                             onClick={() => setView('transactions')}
-                            className={`flex items-center justify-center gap-1.5 px-2 py-2 md:px-6 md:py-2.5 rounded-lg font-bold text-[10px] md:text-sm transition-all ${view === 'transactions' ? 'bg-white text-blue-600 shadow-md ring-1 ring-slate-200' : 'text-slate-500 hover:text-slate-700'}`}
+                            className={`flex items-center justify-center gap-1.5 px-2 py-2 md:px-5 md:py-2.5 rounded-lg font-bold text-[10px] md:text-sm transition-all ${view === 'transactions' ? 'bg-white text-blue-600 shadow-md ring-1 ring-slate-200' : 'text-slate-500 hover:text-slate-700'}`}
                         >
                             <List size={14} className="md:w-4 md:h-4" />
                             <span>Transactions</span>
                         </button>
                         <button
                             onClick={() => setView('analytics')}
-                            className={`flex items-center justify-center gap-1.5 px-2 py-2 md:px-6 md:py-2.5 rounded-lg font-bold text-[10px] md:text-sm transition-all ${view === 'analytics' ? 'bg-white text-blue-600 shadow-md ring-1 ring-slate-200' : 'text-slate-500 hover:text-slate-700'}`}
+                            className={`flex items-center justify-center gap-1.5 px-2 py-2 md:px-5 md:py-2.5 rounded-lg font-bold text-[10px] md:text-sm transition-all ${view === 'analytics' ? 'bg-white text-blue-600 shadow-md ring-1 ring-slate-200' : 'text-slate-500 hover:text-slate-700'}`}
                         >
                             <BarChart3 size={14} className="md:w-4 md:h-4" />
                             <span>Analytics</span>
                         </button>
                         <button
                             onClick={() => setView('users')}
-                            className={`flex items-center justify-center gap-1.5 px-2 py-2 md:px-6 md:py-2.5 rounded-lg font-bold text-[10px] md:text-sm transition-all ${view === 'users' ? 'bg-white text-blue-600 shadow-md ring-1 ring-slate-200' : 'text-slate-500 hover:text-slate-700'}`}
+                            className={`flex items-center justify-center gap-1.5 px-2 py-2 md:px-5 md:py-2.5 rounded-lg font-bold text-[10px] md:text-sm transition-all ${view === 'users' ? 'bg-white text-blue-600 shadow-md ring-1 ring-slate-200' : 'text-slate-500 hover:text-slate-700'}`}
                         >
                             <Users size={14} className="md:w-4 md:h-4" />
                             <span>Users</span>
+                        </button>
+                        <button
+                            onClick={() => { setView('pricing'); fetchProducts(); }}
+                            className={`flex items-center justify-center gap-1.5 px-2 py-2 md:px-5 md:py-2.5 rounded-lg font-bold text-[10px] md:text-sm transition-all ${view === 'pricing' ? 'bg-white text-amber-600 shadow-md ring-1 ring-slate-200' : 'text-slate-500 hover:text-slate-700'}`}
+                        >
+                            <Tag size={14} className="md:w-4 md:h-4" />
+                            <span>Ticket Prices</span>
                         </button>
                     </div>
 
@@ -1200,7 +1413,7 @@ export default function AdminDashboard() {
                                 </div>
                             </div>
                         </div>
-                    ) : (
+                    ) : view === 'users' ? (
                         <div className="overflow-x-auto">
                             <table className="w-full text-left border-collapse">
                                 <thead>
@@ -1260,6 +1473,293 @@ export default function AdminDashboard() {
                                     )}
                                 </tbody>
                             </table>
+                        </div>
+                    ) : (
+                        /* Ticket Pricing View */
+                        <div className="p-4 md:p-6 space-y-6">
+                            {/* Header Banner */}
+                            <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-indigo-950 rounded-2xl p-5 md:p-6 text-white shadow-xl relative overflow-hidden">
+                                <div className="absolute right-0 top-0 w-80 h-80 bg-blue-500/10 rounded-full blur-3xl pointer-events-none"></div>
+                                <div className="relative z-10 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                                    <div>
+                                        <div className="flex items-center gap-2 mb-2">
+                                            <span className="p-2 bg-amber-400 text-slate-900 rounded-xl font-bold">
+                                                <Tag size={18} />
+                                            </span>
+                                            <span className="text-xs font-black uppercase tracking-widest text-amber-400">POS Ticket Settings</span>
+                                            <span className="inline-flex items-center gap-1 bg-emerald-500/20 text-emerald-400 text-[10px] font-bold px-2 py-0.5 rounded-full border border-emerald-500/30">
+                                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                                                Real-time Sync Active
+                                            </span>
+                                        </div>
+                                        <h2 className="text-2xl font-black tracking-tight text-white">Ticket Price Management</h2>
+                                        <p className="text-slate-400 text-xs md:text-sm mt-1 max-w-xl leading-relaxed">
+                                            Change ticket prices for any ride. When saved, new prices are instantly broadcast and prompted to all active POS cashier apps.
+                                        </p>
+                                    </div>
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <button
+                                            onClick={() => handlePromptApp()}
+                                            disabled={promptingApp}
+                                            className="flex items-center gap-2 px-4 py-2.5 bg-amber-400 hover:bg-amber-300 text-slate-900 rounded-xl font-black text-xs transition-all shadow-lg shadow-amber-400/20 active:scale-95"
+                                            title="Broadcast a sync prompt to all active POS tablets"
+                                        >
+                                            <Radio size={16} className={promptingApp ? "animate-spin" : ""} />
+                                            <span>{promptingApp ? 'Broadcasting...' : 'Prompt POS App'}</span>
+                                        </button>
+                                        <button
+                                            onClick={fetchProducts}
+                                            className="flex items-center gap-2 px-3 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl font-bold text-xs border border-slate-700 transition-all"
+                                            title="Reload ticket list from server"
+                                        >
+                                            <RefreshCw size={14} className={loadingProducts ? 'animate-spin' : ''} />
+                                            <span className="hidden sm:inline">Refresh</span>
+                                        </button>
+                                        <button
+                                            onClick={() => navigate('/admin/rides')}
+                                            className="flex items-center gap-1.5 px-3 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold text-xs transition-all shadow-md"
+                                            title="Open full ride management with image upload & creation"
+                                        >
+                                            <span>Full Config</span>
+                                            <ExternalLink size={14} />
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Alert Notification */}
+                            {priceNotification && (
+                                <div className={`p-4 rounded-xl border flex items-center justify-between gap-3 animate-in fade-in slide-in-from-top-2 duration-300 ${
+                                    priceNotification.type === 'success' 
+                                        ? 'bg-emerald-50 border-emerald-200 text-emerald-800' 
+                                        : 'bg-rose-50 border-rose-200 text-rose-800'
+                                }`}>
+                                    <div className="flex items-center gap-2.5">
+                                        {priceNotification.type === 'success' ? (
+                                            <CheckCircle2 size={20} className="text-emerald-600 shrink-0" />
+                                        ) : (
+                                            <AlertCircle size={20} className="text-rose-600 shrink-0" />
+                                        )}
+                                        <span className="text-xs md:text-sm font-bold">{priceNotification.message}</span>
+                                    </div>
+                                    <button 
+                                        onClick={() => setPriceNotification(null)}
+                                        className="text-slate-400 hover:text-slate-700 text-xs font-bold px-2 py-1"
+                                    >
+                                        ✕
+                                    </button>
+                                </div>
+                            )}
+
+                            {/* Search and Category Filter Toolbar */}
+                            <div className="flex flex-col sm:flex-row justify-between items-center gap-4 bg-slate-50 p-4 rounded-2xl border border-slate-200">
+                                <div className="relative w-full sm:w-80">
+                                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                                    <input
+                                        type="text"
+                                        placeholder="Search ticket / ride name..."
+                                        className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-amber-500/20 outline-none font-medium text-xs md:text-sm"
+                                        value={priceSearchTerm}
+                                        onChange={(e) => setPriceSearchTerm(e.target.value)}
+                                    />
+                                </div>
+                                <div className="flex flex-wrap items-center gap-1.5 w-full sm:w-auto">
+                                    {(['all', 'play', 'food', 'event'] as const).map(cat => (
+                                        <button
+                                            key={cat}
+                                            onClick={() => setPriceCategoryFilter(cat)}
+                                            className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${
+                                                priceCategoryFilter === cat 
+                                                    ? 'bg-slate-900 text-white shadow-sm' 
+                                                    : 'bg-white text-slate-600 hover:bg-slate-200 border border-slate-200'
+                                            }`}
+                                        >
+                                            {cat === 'all' ? 'All Tickets' : cat}
+                                        </button>
+                                    ))}
+                                    <span className="text-xs text-slate-400 font-bold ml-2">
+                                        {products.filter(p => {
+                                            const matchesSearch = !priceSearchTerm || p.name?.toLowerCase().includes(priceSearchTerm.toLowerCase()) || (p.id && p.id.toString().toLowerCase().includes(priceSearchTerm.toLowerCase()));
+                                            const matchesCat = priceCategoryFilter === 'all' || (p.category && p.category.toLowerCase() === priceCategoryFilter.toLowerCase());
+                                            return matchesSearch && matchesCat;
+                                        }).length} Tickets
+                                    </span>
+                                </div>
+                            </div>
+
+                            {/* Products Grid */}
+                            {loadingProducts ? (
+                                <div className="py-20 text-center flex flex-col items-center justify-center text-slate-400">
+                                    <RefreshCw size={36} className="animate-spin mb-3 text-amber-500" />
+                                    <span className="font-bold text-sm">Loading ticket prices...</span>
+                                </div>
+                            ) : (
+                                (() => {
+                                    const filtered = products.filter(p => {
+                                        const matchesSearch = !priceSearchTerm || p.name?.toLowerCase().includes(priceSearchTerm.toLowerCase()) || (p.id && p.id.toString().toLowerCase().includes(priceSearchTerm.toLowerCase()));
+                                        const matchesCat = priceCategoryFilter === 'all' || (p.category && p.category.toLowerCase() === priceCategoryFilter.toLowerCase());
+                                        return matchesSearch && matchesCat;
+                                    });
+
+                                    if (filtered.length === 0) {
+                                        return (
+                                            <div className="py-16 text-center text-slate-500 font-medium bg-slate-50 rounded-2xl border border-dashed border-slate-200">
+                                                No tickets found matching your search.
+                                            </div>
+                                        );
+                                    }
+
+                                    return (
+                                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                                            {filtered.map(product => {
+                                                const key = product._id || product.id;
+                                                const currentEditPrice = editingPrices[key] !== undefined ? editingPrices[key] : product.price;
+                                                const isModified = Number(currentEditPrice) !== Number(product.price);
+                                                const isSaving = savingPriceId === key;
+
+                                                return (
+                                                    <div
+                                                        key={key}
+                                                        className={`bg-white rounded-2xl border transition-all duration-200 overflow-hidden flex flex-col shadow-sm hover:shadow-md ${
+                                                            isModified ? 'border-amber-400 ring-2 ring-amber-400/20' : 'border-slate-200'
+                                                        }`}
+                                                    >
+                                                        {/* Top Card Info */}
+                                                        <div className="p-4 bg-slate-50/70 border-b border-slate-100 flex items-center gap-3">
+                                                            <div className="w-14 h-14 rounded-xl bg-slate-200 border border-slate-300 overflow-hidden shrink-0 relative">
+                                                                <img
+                                                                    src={`/rides/${product.image}`}
+                                                                    alt={product.name}
+                                                                    onError={(e) => {
+                                                                        (e.target as HTMLElement).style.display = 'none';
+                                                                    }}
+                                                                    className="w-full h-full object-cover"
+                                                                />
+                                                                <div className="absolute inset-0 flex items-center justify-center text-slate-400 -z-10 font-black text-lg">
+                                                                    🎟️
+                                                                </div>
+                                                            </div>
+                                                            <div className="flex-1 min-w-0">
+                                                                <div className="flex items-center gap-2">
+                                                                    <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">ID: {product.id}</span>
+                                                                    <span className={`text-[9px] font-black px-1.5 py-0.5 rounded uppercase ${
+                                                                        product.status === 'off' ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'
+                                                                    }`}>
+                                                                        {product.status === 'off' ? 'Inactive' : 'Active'}
+                                                                    </span>
+                                                                </div>
+                                                                <h3 className="font-black text-slate-900 text-base truncate leading-tight mt-0.5" title={product.name}>
+                                                                    {product.name}
+                                                                </h3>
+                                                                <div className="flex items-center gap-1.5 mt-1">
+                                                                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider bg-slate-200/70 px-1.5 py-0.5 rounded">
+                                                                        {product.category || 'play'}
+                                                                    </span>
+                                                                    {product.allowedPos && product.allowedPos.length > 0 && (
+                                                                        <span className="text-[9px] font-mono text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded truncate max-w-[120px]">
+                                                                            {product.allowedPos[0]}
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+
+                                                        {/* Price Settings Body */}
+                                                        <div className="p-4 space-y-3 flex-1 flex flex-col justify-between">
+                                                            <div className="flex items-baseline justify-between">
+                                                                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Current Ticket Price:</span>
+                                                                <span className="text-2xl font-black text-slate-900">
+                                                                    ₹{product.price}
+                                                                </span>
+                                                            </div>
+
+                                                            {/* Input & Quick Adjusters */}
+                                                            <div className="space-y-2">
+                                                                <label className="block text-[11px] font-extrabold text-slate-500 uppercase tracking-wider">
+                                                                    New Ticket Rate (₹)
+                                                                </label>
+                                                                <div className="relative">
+                                                                    <span className="absolute left-3 top-1/2 -translate-y-1/2 font-black text-slate-400 text-base">₹</span>
+                                                                    <input
+                                                                        type="number"
+                                                                        min="0"
+                                                                        step="1"
+                                                                        value={currentEditPrice}
+                                                                        onChange={(e) => {
+                                                                            const val = parseInt(e.target.value) || 0;
+                                                                            setEditingPrices(prev => ({ ...prev, [key]: val }));
+                                                                        }}
+                                                                        className={`w-full pl-8 pr-3 py-2 text-lg font-black rounded-xl border outline-none transition-all ${
+                                                                            isModified 
+                                                                                ? 'bg-amber-50/50 border-amber-400 text-slate-900 focus:ring-2 focus:ring-amber-400/30' 
+                                                                                : 'bg-slate-50 border-slate-200 text-slate-800 focus:ring-2 focus:ring-blue-500/20'
+                                                                        }`}
+                                                                    />
+                                                                </div>
+
+                                                                {/* Quick Increments */}
+                                                                <div className="grid grid-cols-4 gap-1.5 pt-1">
+                                                                    {[-10, 10, 20, 50].map(delta => (
+                                                                        <button
+                                                                            key={delta}
+                                                                            type="button"
+                                                                            onClick={() => {
+                                                                                const current = Number(editingPrices[key] !== undefined ? editingPrices[key] : product.price);
+                                                                                const next = Math.max(0, current + delta);
+                                                                                setEditingPrices(prev => ({ ...prev, [key]: next }));
+                                                                            }}
+                                                                            className="px-1.5 py-1 text-[11px] font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg transition-colors border border-slate-200"
+                                                                        >
+                                                                            {delta > 0 ? `+₹${delta}` : `-₹${Math.abs(delta)}`}
+                                                                        </button>
+                                                                    ))}
+                                                                </div>
+                                                            </div>
+
+                                                            {/* Actions */}
+                                                            <div className="pt-2 flex items-center gap-2">
+                                                                <button
+                                                                    onClick={() => handleUpdatePrice(product)}
+                                                                    disabled={isSaving || !isModified}
+                                                                    className={`flex-1 py-2.5 px-4 rounded-xl font-black text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition-all shadow-md ${
+                                                                        isModified 
+                                                                            ? 'bg-amber-500 hover:bg-amber-600 text-slate-950 shadow-amber-500/20 active:scale-95' 
+                                                                            : 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200'
+                                                                    }`}
+                                                                >
+                                                                    {isSaving ? (
+                                                                        <>
+                                                                            <RefreshCw size={14} className="animate-spin" />
+                                                                            <span>Saving & Syncing...</span>
+                                                                        </>
+                                                                    ) : (
+                                                                        <>
+                                                                            <Check size={14} />
+                                                                            <span>{isModified ? 'Save & Prompt App' : 'Price Unchanged'}</span>
+                                                                        </>
+                                                                    )}
+                                                                </button>
+                                                                {isModified && (
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => {
+                                                                            setEditingPrices(prev => ({ ...prev, [key]: product.price }));
+                                                                        }}
+                                                                        className="p-2.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-xl transition-colors border border-slate-200 text-xs font-bold"
+                                                                        title="Reset"
+                                                                    >
+                                                                        Reset
+                                                                    </button>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    );
+                                })()
+                            )}
                         </div>
                     )}
 

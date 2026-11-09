@@ -4,7 +4,7 @@ import { RideCard } from '../components/RideCard';
 import { Cart } from '../components/Cart';
 import { Ticket } from '../components/Ticket';
 // TicketVerifier removed
-import { Ticket as TicketIcon, LogOut, WifiOff, RefreshCw, Printer, X, Smartphone } from 'lucide-react';
+import { Ticket as TicketIcon, LogOut, WifiOff, RefreshCw, Printer, X, Smartphone, Bell, Tag } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
 import { API_URL } from '../api/config';
@@ -23,6 +23,15 @@ export default function POS() {
     const [paymentMode, setPaymentMode] = useState<'upi' | null>('upi');
     const [rides, setRides] = useState<Ride[]>([]);
     const [loadingRides, setLoadingRides] = useState(true);
+
+    // Ticket Price Update Prompt State
+    const [pricePrompt, setPricePrompt] = useState<{
+        title: string;
+        message: string;
+        updates?: { name: string; oldPrice?: number; newPrice: number }[];
+        timestamp: number;
+    } | null>(null);
+
     // State for preview and cropping
     const [showPrintPreview, setShowPrintPreview] = useState(false);
     const [ticketsToSave, setTicketsToSave] = useState<any[]>([]);
@@ -198,49 +207,174 @@ export default function POS() {
         }
     }, [navigate]);
 
-    // Fetch Rides from API
-    useEffect(() => {
-        const fetchRides = async () => {
-            setLoadingRides(true);
-            try {
-                // Use centralized API_URL
-                const token = localStorage.getItem('token');
-                const response = await axios.get(`${API_URL}/api/products?t=${Date.now()}`, {
-                    headers: { Authorization: `Bearer ${token}` }
-                });
-                console.log('Fetched Rides:', response.data);
-                
-                // FORCE: Change 'Train' price back to 50
-                const adjustedRides = response.data.map((r: any) => {
-                    if (r.name.toUpperCase().includes('TRAIN')) {
-                        return { ...r, price: 50 };
-                    }
-                    return r;
-                });
-                
-                setRides(adjustedRides);
-                // Cache the data for offline/unstable server use
-                localStorage.setItem('cached_rides', JSON.stringify(adjustedRides));
-            } catch (error) {
-                console.error('Failed to fetch rides, trying local cache...', error);
-                
-                // Fallback to cached rides from LocalStorage
-                const cached = localStorage.getItem('cached_rides');
-                if (cached) {
-                    try {
-                        const parsed = JSON.parse(cached);
-                        setRides(parsed);
-                        console.log('Loaded rides from LocalStorage cache');
-                    } catch (parseError) {
-                        console.error('Failed to parse cached rides', parseError);
-                    }
+    // Web Audio Chime for App Prompting
+    const playNotificationChime = useCallback(() => {
+        try {
+            const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+            if (!AudioCtx) return;
+            const ctx = new AudioCtx();
+            const now = ctx.currentTime;
+
+            const osc1 = ctx.createOscillator();
+            const gain1 = ctx.createGain();
+            osc1.type = 'sine';
+            osc1.frequency.setValueAtTime(587.33, now); // D5
+            gain1.gain.setValueAtTime(0.12, now);
+            gain1.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
+            osc1.connect(gain1);
+            gain1.connect(ctx.destination);
+            osc1.start(now);
+            osc1.stop(now + 0.25);
+
+            const osc2 = ctx.createOscillator();
+            const gain2 = ctx.createGain();
+            osc2.type = 'sine';
+            osc2.frequency.setValueAtTime(880, now + 0.15); // A5
+            gain2.gain.setValueAtTime(0.15, now + 0.15);
+            gain2.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
+            osc2.connect(gain2);
+            gain2.connect(ctx.destination);
+            osc2.start(now + 0.15);
+            osc2.stop(now + 0.5);
+        } catch (e) {
+            // Audio context might be restricted, ignore silently
+        }
+    }, []);
+
+    // Fetch Rides from API with Real-Time Difference Detection
+    const fetchRides = useCallback(async (isBackgroundUpdate = false, broadcastData?: any) => {
+        if (!isBackgroundUpdate) setLoadingRides(true);
+        try {
+            const token = localStorage.getItem('token');
+            const response = await axios.get(`${API_URL}/api/products?t=${Date.now()}`, {
+                headers: { Authorization: `Bearer ${token}` }
+            });
+            const freshRides: Ride[] = response.data;
+
+            // Detect any price differences if this is a background update or broadcast
+            setRides(prevRides => {
+                const changes: { name: string; oldPrice?: number; newPrice: number }[] = [];
+                if (prevRides && prevRides.length > 0) {
+                    freshRides.forEach(fresh => {
+                        const old = prevRides.find(p => (p._id || p.id) === (fresh._id || fresh.id));
+                        if (old && old.price !== fresh.price) {
+                            changes.push({
+                                name: fresh.name,
+                                oldPrice: old.price,
+                                newPrice: fresh.price
+                            });
+                        }
+                    });
                 }
-            } finally {
-                setLoadingRides(false);
+
+                // If changes were detected OR we received an explicit broadcast from Admin
+                if (changes.length > 0 || broadcastData) {
+                    playNotificationChime();
+                    const promptMsg = changes.length > 0
+                        ? `Admin updated prices: ${changes.map(c => `${c.name} (₹${c.oldPrice} ➔ ₹${c.newPrice})`).join(', ')}`
+                        : broadcastData?.name
+                            ? `Admin updated "${broadcastData.name}" ticket price to ₹${broadcastData.newPrice}`
+                            : 'Admin has updated ticket pricing. The latest rates are now active.';
+
+                    setPricePrompt({
+                        title: 'Ticket Prices Updated',
+                        message: promptMsg,
+                        updates: changes.length > 0 ? changes : (broadcastData?.name ? [{ name: broadcastData.name, newPrice: broadcastData.newPrice, oldPrice: broadcastData.oldPrice }] : []),
+                        timestamp: Date.now()
+                    });
+
+                    // Automatically adjust any matching items in the active Cart!
+                    setCart(currentCart => currentCart.map(item => {
+                        const matchedFresh = freshRides.find(f => (f._id || f.id) === (item._id || item.id));
+                        if (matchedFresh && matchedFresh.price !== item.price) {
+                            return { ...item, price: matchedFresh.price };
+                        }
+                        return item;
+                    }));
+                }
+
+                return freshRides;
+            });
+
+            // Cache the fresh data
+            localStorage.setItem('cached_rides', JSON.stringify(freshRides));
+        } catch (error) {
+            console.error('Failed to fetch rides, trying local cache...', error);
+            const cached = localStorage.getItem('cached_rides');
+            if (cached) {
+                try {
+                    const parsed = JSON.parse(cached);
+                    setRides(parsed);
+                } catch (parseError) {
+                    console.error('Failed to parse cached rides', parseError);
+                }
+            }
+        } finally {
+            if (!isBackgroundUpdate) setLoadingRides(false);
+        }
+    }, [playNotificationChime]);
+
+    // Real-Time Price Sync Listeners: BroadcastChannel, Storage, Polling, Focus
+    useEffect(() => {
+        // Initial fetch
+        fetchRides();
+
+        // 1. BroadcastChannel for same-origin tabs/windows
+        let channel: BroadcastChannel | null = null;
+        try {
+            channel = new BroadcastChannel('ethree_price_sync');
+            channel.onmessage = (event) => {
+                console.log('[POS] Received ethree_price_sync broadcast:', event.data);
+                if (event.data?.type === 'PRICE_UPDATED' || event.data?.type === 'PROMPT_APP') {
+                    fetchRides(true, event.data);
+                }
+            };
+        } catch (e) {
+            console.warn('[POS] BroadcastChannel not supported', e);
+        }
+
+        // 2. Storage event listener (across browser tabs/windows)
+        const handleStorage = (e: StorageEvent) => {
+            if (e.key === 'ticket_prices_updated_at' && e.newValue) {
+                try {
+                    const data = JSON.parse(e.newValue);
+                    console.log('[POS] Detected storage ticket price update:', data);
+                    fetchRides(true, data);
+                } catch (err) {
+                    fetchRides(true);
+                }
             }
         };
-        fetchRides();
-    }, []);
+        window.addEventListener('storage', handleStorage);
+
+        // 3. Periodic Background Check (every 15 seconds)
+        const pollTimer = setInterval(() => {
+            fetchRides(true);
+        }, 15000);
+
+        // 4. Window focus check (whenever cashier opens/switches to the POS app)
+        const handleFocus = () => {
+            fetchRides(true);
+        };
+        window.addEventListener('focus', handleFocus);
+
+        return () => {
+            if (channel) channel.close();
+            window.removeEventListener('storage', handleStorage);
+            window.removeEventListener('focus', handleFocus);
+            clearInterval(pollTimer);
+        };
+    }, [fetchRides]);
+
+    // Auto-dismiss price prompt after 10 seconds
+    useEffect(() => {
+        if (pricePrompt) {
+            const timer = setTimeout(() => {
+                setPricePrompt(null);
+            }, 10000);
+            return () => clearTimeout(timer);
+        }
+    }, [pricePrompt]);
 
     // Monitor Network Status
     useEffect(() => {
@@ -688,6 +822,58 @@ export default function POS() {
 
     return (
         <div className="min-h-screen bg-slate-100 font-sans text-slate-900">
+            {/* Real-time Ticket Price Update Prompt */}
+            {pricePrompt && (
+                <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[100] w-11/12 max-w-lg animate-in slide-in-from-top-4 fade-in duration-300">
+                    <div className="bg-slate-900/95 backdrop-blur-md text-white border-2 border-amber-400 rounded-2xl shadow-2xl p-4 flex items-start gap-3.5 ring-4 ring-amber-400/20">
+                        <div className="p-2.5 bg-amber-400 text-slate-900 rounded-xl shrink-0 animate-bounce">
+                            <Bell size={20} className="font-black" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between gap-2">
+                                <h4 className="text-xs font-black uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
+                                    <span>{pricePrompt.title}</span>
+                                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+                                </h4>
+                                <span className="text-[10px] text-slate-400 font-mono">Live Sync</span>
+                            </div>
+                            <p className="text-xs text-slate-200 font-medium mt-1 leading-relaxed">
+                                {pricePrompt.message}
+                            </p>
+                            {pricePrompt.updates && pricePrompt.updates.length > 0 && (
+                                <div className="mt-2.5 space-y-1.5 bg-slate-800/90 rounded-xl p-2.5 border border-slate-700">
+                                    {pricePrompt.updates.map((u, idx) => (
+                                        <div key={idx} className="flex justify-between items-center text-xs">
+                                            <span className="font-bold text-slate-200 truncate">{u.name}</span>
+                                            <span className="font-black text-amber-400 whitespace-nowrap ml-2">
+                                                {u.oldPrice !== undefined && (
+                                                    <span className="line-through text-slate-500 mr-1.5 text-[11px]">₹{u.oldPrice}</span>
+                                                )}
+                                                ₹{u.newPrice}
+                                            </span>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                            <div className="mt-2.5 flex justify-end">
+                                <button
+                                    onClick={() => setPricePrompt(null)}
+                                    className="bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-[11px] uppercase tracking-wider px-3.5 py-1.5 rounded-lg transition-all active:scale-95 shadow-md"
+                                >
+                                    Got It / Dismiss
+                                </button>
+                            </div>
+                        </div>
+                        <button
+                            onClick={() => setPricePrompt(null)}
+                            className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition-colors"
+                        >
+                            <X size={16} />
+                        </button>
+                    </div>
+                </div>
+            )}
+
             {/* Screen Layout */}
             <div className="print:hidden flex flex-col h-screen">
                 <header className="bg-slate-900 border-b border-slate-800 text-white p-2 md:p-3 shadow-xl z-20 sticky top-0">
@@ -733,6 +919,23 @@ export default function POS() {
                                         <span>{pendingCount}</span>
                                     </div>
                                 )}
+
+                                {/* Ticket Price Sync Button */}
+                                <button
+                                    onClick={() => {
+                                        fetchRides(false);
+                                        setPricePrompt({
+                                            title: 'Prices Synchronized',
+                                            message: 'Latest ticket prices successfully synchronized with server.',
+                                            timestamp: Date.now()
+                                        });
+                                    }}
+                                    className="px-2 py-0.5 md:py-1 rounded-full text-[10px] md:text-xs font-bold flex items-center gap-1 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 transition-all active:scale-95"
+                                    title="Sync Latest Ticket Prices from Server"
+                                >
+                                    <Tag size={10} />
+                                    <span className="hidden sm:inline">Sync Rates</span>
+                                </button>
 
                                  {/* Bluetooth Printer Pairing */}
                                  <button 

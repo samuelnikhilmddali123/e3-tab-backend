@@ -34,7 +34,7 @@ const seedInitialData = async () => {
         const initialRides = [
             // POS 1 RIDES (From Database Image)
             { id: '1', name: 'COMBO', price: 500, allowedPos: ['pos1@ethree.com'], category: 'play', version: '5.0', description: 'The ultimate entertainment value pack! Includes access to multiple top-rated rides and attractions for a complete ETHREE experience.', image: 'logo.jpeg', status: 'on' },
-            { id: '2', name: 'TL TRAIN', price: 1, allowedPos: ['pos1@ethree.com'], category: 'play', version: '5.0', description: 'A classic train ride perfect for families and children. Enjoy a scenic tour around the park in our comfortable and safe trackless train.', image: 'TL train.jpg', status: 'on' },
+            { id: '2', name: 'TL TRAIN', price: 50, allowedPos: ['pos1@ethree.com'], category: 'play', version: '5.0', description: 'A classic train ride perfect for families and children. Enjoy a scenic tour around the park in our comfortable and safe trackless train.', image: 'TL train.jpg', status: 'on' },
             { id: '3', name: 'ETHREE BUS', price: 100, allowedPos: ['pos1@ethree.com'], category: 'play', version: '5.0', description: 'Hop on the ETHREE Shuttle Bus for a fun and easy way to navigate the park. A favorite for kids who love big vehicles!', image: 'e three bus ride.webp', status: 'on' },
             { id: '4', name: 'BOUNCY', price: 100, allowedPos: ['pos1@ethree.com'], category: 'play', version: '5.0', description: 'High-energy inflatable fun! Our giant bouncy castle provides a safe and exciting environment for children to jump and play.', image: 'BOUNCY.webp', status: 'on' },
             { id: '5', name: 'SAMBA BALLOON', price: 150, allowedPos: ['pos1@ethree.com'], category: 'play', version: '5.0', description: 'Soar high in colorful hot air balloons that spin and tilt. A vibrant and rhythmic ride that brings the carnival atmosphere to life.', image: 'SAMBA BALLOON.jpg', status: 'on' },
@@ -82,6 +82,8 @@ router.get('/', optionalAuth, async (req, res) => {
             console.log('📦 Database empty, running initial seed...');
             await seedInitialData();
         }
+
+
 
         let query = {};
         if (req.user && req.user.role === 'superadmin') {
@@ -190,13 +192,51 @@ router.put('/:id', auth, admin, async (req, res) => {
     try {
         let updateData = req.body;
         // Prevent branch admins from making a local ride global or transferring it
-        if (req.user.role === 'admin') {
+        if (req.user.role === 'admin' && req.user.posId && updateData.allowedPos) {
             updateData.allowedPos = [`${req.user.posId}@ethree.com`];
         }
 
-        const product = await Product.findByIdAndUpdate(req.params.id, updateData, { new: true });
+        let product;
+        if (mongoose.Types.ObjectId.isValid(req.params.id)) {
+            product = await Product.findByIdAndUpdate(req.params.id, updateData, { new: true });
+        }
+        if (!product) {
+            product = await Product.findOneAndUpdate({ id: req.params.id }, updateData, { new: true });
+        }
+
         if (!product) return res.status(404).json({ message: 'Product not found' });
         res.json(product);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+/**
+ * @swagger
+ * /api/products/:id/price:
+ *   patch:
+ *     summary: Quick update ticket price for a ride (Admin only)
+ *     tags: [Products]
+ */
+router.patch('/:id/price', auth, admin, async (req, res) => {
+    try {
+        const { price } = req.body;
+        if (price === undefined || isNaN(Number(price))) {
+            return res.status(400).json({ message: 'Valid price number is required' });
+        }
+
+        const newPrice = Number(price);
+        let product;
+        if (mongoose.Types.ObjectId.isValid(req.params.id)) {
+            product = await Product.findByIdAndUpdate(req.params.id, { price: newPrice }, { new: true });
+        }
+        if (!product) {
+            product = await Product.findOneAndUpdate({ id: req.params.id }, { price: newPrice }, { new: true });
+        }
+
+        if (!product) return res.status(404).json({ message: 'Product not found' });
+        console.log(`[Pricing] Updated price for ${product.name} (${product.id}) to ₹${newPrice}`);
+        res.json({ message: 'Ticket price updated successfully', product });
     } catch (err) {
         res.status(500).json({ message: err.message });
     }

@@ -85,9 +85,9 @@ async function syncPaymentStatus({ txnid, status, easepayid, amount }) {
         console.error('[PAYMENT SYNC] Error updating Order:', err.message);
     }
 
-    // 3. Update Ticket Record (if exists)
+    // 3. Update or Create Ticket Record
     try {
-        const ticket = await Ticket.findOne({ id: txnid });
+        let ticket = await Ticket.findOne({ id: txnid });
         if (ticket) {
             if (isSuccess) {
                 ticket.paymentMode = 'upi';
@@ -98,9 +98,67 @@ async function syncPaymentStatus({ txnid, status, easepayid, amount }) {
             await ticket.save();
             results.ticketUpdated = true;
             console.log(`[PAYMENT SYNC] Ticket ${ticket.id} updated to ${ticket.status}`);
+        } else if (isSuccess) {
+            // Auto-create Master Ticket from Ride if missing
+            const ride = await findRide(txnid);
+            const totalAmount = Number(amount || ride?.amount || ride?.fare || 0);
+            const rideName = ride?.rideName || 'Ride Ticket';
+            const match = rideName.match(/^(.+?)\s*\(x(\d+)\)$/i);
+            const itemName = match ? match[1].trim() : rideName;
+            const quantity = match ? (parseInt(match[2], 10) || 1) : 1;
+            const unitPrice = quantity > 0 ? Math.round(totalAmount / quantity) : totalAmount;
+            const posId = (ride?.passengerEmail && ride.passengerEmail.toLowerCase().includes('pos2')) ? 'pos2' : 'pos1';
+            const createdBy = ride?.passengerName || 'POS Terminal 1';
+            const mobile = ride?.passengerPhone || '';
+            const dateStr = now.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+
+            ticket = await Ticket.create({
+                id: txnid,
+                amount: totalAmount,
+                date: dateStr,
+                items: [{
+                    id: itemName.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+                    name: itemName,
+                    price: unitPrice,
+                    quantity: quantity
+                }],
+                status: 'valid',
+                mobile: mobile,
+                paymentMode: 'upi',
+                createdBy: createdBy,
+                posId: posId,
+                createdAt: now,
+                isCoupon: false
+            });
+
+            // Create individual coupons
+            for (let i = 0; i < quantity; i++) {
+                await Ticket.create({
+                    id: `${txnid}-${i}`,
+                    amount: unitPrice,
+                    date: dateStr,
+                    items: [{
+                        id: itemName.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+                        name: itemName,
+                        price: unitPrice,
+                        quantity: 1
+                    }],
+                    status: 'valid',
+                    mobile: mobile,
+                    paymentMode: 'upi',
+                    createdBy: createdBy,
+                    posId: posId,
+                    createdAt: now,
+                    isCoupon: true,
+                    parentId: txnid
+                });
+            }
+
+            results.ticketUpdated = true;
+            console.log(`[PAYMENT SYNC] Auto-created Ticket ${txnid} with ${quantity} coupons`);
         }
     } catch (err) {
-        console.error('[PAYMENT SYNC] Error updating Ticket:', err.message);
+        console.error('[PAYMENT SYNC] Error updating/creating Ticket:', err.message);
     }
 
     // 4. If neither Ride nor Order existed, create a completed Ride record so subsequent status checks find it
